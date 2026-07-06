@@ -12,15 +12,18 @@ Build a lightweight Rust honeypot for Debian/Ubuntu servers. The service listens
 - Support `ufw`, plain `iptables`, and an efficient high-volume `iptables + ipset` mode.
 - Persist banned IP state locally and restore it on service startup.
 - Provide a minimal password-protected HTTP admin interface.
+- Optionally serve the admin interface on the honeypot listener under a configured hidden path.
 - Sync banned IP state to a configured WebDAV endpoint.
 - Provide configurable file logging with level and retention controls.
+- Provide a systemd service installer for Debian/Ubuntu deployments.
 
 ## Non-Goals
 
 - This project does not emulate a full SSH, HTTP, FTP, or database protocol.
 - This project does not provide a web dashboard.
-- This project does not manage Linux service installation automatically.
+- This project does not install OS package dependencies automatically.
 - This project does not replace system-level firewall persistence tooling.
+- This project does not guarantee that sophisticated scanners cannot identify it as a honeypot.
 
 ## Personas
 
@@ -87,6 +90,7 @@ Build a lightweight Rust honeypot for Debian/Ubuntu servers. The service listens
 ```
 
 - `GET /banned` returns the current persisted banned IP snapshot.
+- If `admin.inline_on_honeypot_port = true`, these endpoints are served on the honeypot listener under `admin.inline_path_prefix`, for example `http://host:22/_honeypot_admin/unban`.
 
 ### State Persistence
 
@@ -126,6 +130,25 @@ Build a lightweight Rust honeypot for Debian/Ubuntu servers. The service listens
   - unban success/failure
   - WebDAV sync success/failure
   - service startup/shutdown
+
+### Service Installation
+
+- `scripts/install-service.sh` installs:
+  - `/usr/local/bin/honeypot`
+  - `/etc/honeypot/config.toml`
+  - `/etc/systemd/system/honeypot.service`
+  - `/var/lib/honeypot`
+  - `/var/log/honeypot`
+- The installer enables `honeypot.service`.
+- The installer starts the service only when `--start` is provided.
+
+### Port 22 SSH-Like Behavior
+
+- Operators can bind `honeypot.listen_addr` to `0.0.0.0:22`.
+- The service can send a configurable OpenSSH-like banner.
+- The service can wait for a client identification string after sending its banner.
+- The service can delay connection close.
+- This reduces trivial banner-only fingerprints but does not implement full SSH key exchange, authentication, or session behavior.
 
 ## Non-Functional Requirements
 

@@ -5,10 +5,17 @@ window_seconds = 60
 max_tracked_ips = 100000
 allowlist = ["127.0.0.1", "::1", "172.23.16.0/24"]
 banner = "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3\r\n"
+read_after_banner_timeout_ms = 1500
+close_delay_ms = 0
 
 [admin]
 listen_addr = "127.0.0.1:8080"
 password = "replace-with-a-long-random-password"
+# When true, admin endpoints are served on the honeypot listener under inline_path_prefix.
+# Example: http://host:2222/_honeypot_admin/unban?ip=203.0.113.10&password=...
+inline_on_honeypot_port = false
+inline_path_prefix = "/_honeypot_admin"
+inline_probe_timeout_ms = 250
 
 [firewall]
 # Options:

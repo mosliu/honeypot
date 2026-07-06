@@ -42,6 +42,20 @@ impl AppConfig {
             !self.admin.password.trim().is_empty(),
             "admin.password must not be empty"
         );
+        if self.admin.inline_on_honeypot_port {
+            ensure!(
+                self.admin.inline_path_prefix.starts_with('/'),
+                "admin.inline_path_prefix must start with /"
+            );
+            ensure!(
+                !self.admin.inline_path_prefix.contains(char::is_whitespace),
+                "admin.inline_path_prefix must not contain whitespace"
+            );
+            ensure!(
+                self.admin.inline_probe_timeout_ms > 0,
+                "admin.inline_probe_timeout_ms must be greater than 0"
+            );
+        }
         ensure!(
             self.logging.retention_files > 0,
             "logging.retention_files must be greater than 0"
@@ -70,6 +84,8 @@ pub struct HoneypotConfig {
     pub max_tracked_ips: usize,
     pub allowlist: Vec<AllowlistEntry>,
     pub banner: String,
+    pub read_after_banner_timeout_ms: u64,
+    pub close_delay_ms: u64,
 }
 
 impl Default for HoneypotConfig {
@@ -84,6 +100,8 @@ impl Default for HoneypotConfig {
                 "::1".parse().expect("valid loopback IP"),
             ],
             banner: "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3\r\n".to_string(),
+            read_after_banner_timeout_ms: 1500,
+            close_delay_ms: 0,
         }
     }
 }
@@ -93,6 +111,9 @@ impl Default for HoneypotConfig {
 pub struct AdminConfig {
     pub listen_addr: String,
     pub password: String,
+    pub inline_on_honeypot_port: bool,
+    pub inline_path_prefix: String,
+    pub inline_probe_timeout_ms: u64,
 }
 
 impl Default for AdminConfig {
@@ -100,6 +121,9 @@ impl Default for AdminConfig {
         Self {
             listen_addr: "127.0.0.1:8080".to_string(),
             password: "change-me".to_string(),
+            inline_on_honeypot_port: false,
+            inline_path_prefix: "/_honeypot_admin".to_string(),
+            inline_probe_timeout_ms: 250,
         }
     }
 }

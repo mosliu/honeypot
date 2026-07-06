@@ -53,29 +53,51 @@ async fn main() -> anyhow::Result<()> {
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);
     let mut honeypot_task = tokio::spawn(run_honeypot(
         config.honeypot.clone(),
+        config.admin.clone(),
         manager.clone(),
         shutdown_receiver.clone(),
     ));
-    let mut admin_task = tokio::spawn(run_admin_api(
-        config.admin.clone(),
-        manager.clone(),
-        shutdown_receiver,
-    ));
+    let mut admin_task = if config.admin.inline_on_honeypot_port {
+        info!(
+            path_prefix = config.admin.inline_path_prefix,
+            "admin API is enabled on the honeypot listener"
+        );
+        None
+    } else {
+        Some(tokio::spawn(run_admin_api(
+            config.admin.clone(),
+            manager.clone(),
+            shutdown_receiver,
+        )))
+    };
 
-    let completed = tokio::select! {
-        signal = tokio::signal::ctrl_c() => {
-            signal.context("failed to listen for Ctrl-C")?;
-            info!("shutdown signal received");
-            None
+    let completed = if let Some(admin_task) = admin_task.as_mut() {
+        tokio::select! {
+            signal = tokio::signal::ctrl_c() => {
+                signal.context("failed to listen for Ctrl-C")?;
+                info!("shutdown signal received");
+                None
+            }
+            result = &mut honeypot_task => Some(("honeypot listener", result)),
+            result = admin_task => Some(("admin API", result)),
         }
-        result = &mut honeypot_task => Some(("honeypot listener", result)),
-        result = &mut admin_task => Some(("admin API", result)),
+    } else {
+        tokio::select! {
+            signal = tokio::signal::ctrl_c() => {
+                signal.context("failed to listen for Ctrl-C")?;
+                info!("shutdown signal received");
+                None
+            }
+            result = &mut honeypot_task => Some(("honeypot listener", result)),
+        }
     };
 
     let _ = shutdown_sender.send(true);
 
     if let Some((name, result)) = completed {
-        admin_task.abort();
+        if let Some(admin_task) = &admin_task {
+            admin_task.abort();
+        }
         honeypot_task.abort();
         match result {
             Ok(Ok(())) => bail!("{name} stopped unexpectedly"),
@@ -89,7 +111,9 @@ async fn main() -> anyhow::Result<()> {
 
     let _ = timeout(Duration::from_secs(5), async {
         let _ = honeypot_task.await;
-        let _ = admin_task.await;
+        if let Some(admin_task) = admin_task {
+            let _ = admin_task.await;
+        }
     })
     .await;
     info!("honeypot stopped");

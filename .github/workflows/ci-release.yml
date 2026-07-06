@@ -1,0 +1,136 @@
+name: CI and Release
+
+on:
+  push:
+    branches:
+      - "**"
+    tags:
+      - "v*"
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: CI
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        run: |
+          if ! command -v cargo >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+          rustup update stable
+          rustup default stable
+          rustup component add rustfmt clippy
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test
+
+      - name: Build release binary
+        run: cargo build --release
+
+  release-build:
+    name: Build release artifact (${{ matrix.target }})
+    needs: ci
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            archive: honeypot-x86_64-unknown-linux-gnu.tar.gz
+            apt: ""
+            linker_env: ""
+            linker: ""
+          - target: x86_64-unknown-linux-musl
+            archive: honeypot-x86_64-unknown-linux-musl.tar.gz
+            apt: musl-tools
+            linker_env: ""
+            linker: ""
+          - target: aarch64-unknown-linux-gnu
+            archive: honeypot-aarch64-unknown-linux-gnu.tar.gz
+            apt: gcc-aarch64-linux-gnu
+            linker_env: CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER
+            linker: aarch64-linux-gnu-gcc
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        run: |
+          if ! command -v cargo >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+          rustup update stable
+          rustup default stable
+
+      - name: Install target packages
+        if: ${{ matrix.apt != '' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.apt }}
+
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Configure linker
+        if: ${{ matrix.linker_env != '' }}
+        run: echo "${{ matrix.linker_env }}=${{ matrix.linker }}" >> "$GITHUB_ENV"
+
+      - name: Build target
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package artifact
+        run: |
+          package_dir="dist/honeypot-${{ matrix.target }}"
+          mkdir -p "$package_dir"
+          cp "target/${{ matrix.target }}/release/honeypot" "$package_dir/"
+          cp README.md config.example.toml "$package_dir/"
+          cp -r docs "$package_dir/"
+          tar -czf "dist/${{ matrix.archive }}" -C dist "honeypot-${{ matrix.target }}"
+          sha256sum "dist/${{ matrix.archive }}" > "dist/${{ matrix.archive }}.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            dist/${{ matrix.archive }}
+            dist/${{ matrix.archive }}.sha256
+
+  release-publish:
+    name: Publish GitHub Release
+    needs: release-build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

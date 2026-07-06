@@ -11,6 +11,9 @@
 7. Use Git for code management.
 8. Put the requirements and generated PRD under `docs/`.
 9. Use a logging framework to record ban activity. Logging must allow configuring the log path, retained file count, retained days, and log level.
+10. Provide a way to automatically install the program as a system service.
+11. Allow the unban API to be served directly on the configured honeypot port.
+12. The primary deployment target is port 22. Reduce obvious honeypot fingerprints where practical, while documenting that complete indistinguishability requires a full SSH protocol implementation.
 
 ## Implemented Interpretation
 
@@ -25,6 +28,9 @@
   - `GET /banned?password=...`.
   - `GET /health`.
 - `honeypot.allowlist` supports exact IP entries and CIDR entries, for example `127.0.0.1`, `::1`, and `172.23.16.0/24`.
+- `admin.inline_on_honeypot_port = true` serves admin endpoints on the honeypot listener under `admin.inline_path_prefix`.
+- `scripts/install-service.sh` installs the release binary, config, and systemd unit.
+- Port 22 can be used by setting `honeypot.listen_addr = "0.0.0.0:22"`. The current implementation can mimic an OpenSSH banner and timing, but does not implement a complete SSH key exchange.
 - WebDAV sync is optional. When enabled, the program uploads a complete JSON snapshot of all banned IPs using HTTP `PUT`.
 - Logging uses the `tracing` ecosystem and writes daily rolling log files under the configured directory.
 - For many banned IPs, `firewall.backend = "iptables_ipset"` is the recommended mode. It keeps one iptables rule and stores IP membership in ipset hash sets.

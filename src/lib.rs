@@ -4,6 +4,7 @@ pub mod ban;
 pub mod config;
 pub mod firewall;
 pub mod honeypot;
+pub mod inline_admin;
 pub mod logging;
 pub mod store;
 pub mod tracker;

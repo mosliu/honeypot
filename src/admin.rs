@@ -165,7 +165,7 @@ async fn unban(state: AdminState, ip: IpAddr, password: String) -> impl IntoResp
     }
 }
 
-fn password_matches(provided: &str, expected: &str) -> bool {
+pub(crate) fn password_matches(provided: &str, expected: &str) -> bool {
     let provided = provided.as_bytes();
     let expected = expected.as_bytes();
     let max_len = provided.len().max(expected.len());
