@@ -81,15 +81,29 @@ impl<R: CommandRunner> Firewall for SystemFirewall<R> {
         for command in self.setup_commands() {
             self.run_required(&command)?;
         }
-        if self.config.backend == FirewallBackend::IptablesIpset {
-            self.ensure_ipset_rule(false)?;
-            self.ensure_ipset_rule(true)?;
+        match self.config.backend {
+            FirewallBackend::Nftables => {
+                self.ensure_nft_table()?;
+                self.ensure_nft_chain()?;
+                self.ensure_nft_set(false)?;
+                self.ensure_nft_set(true)?;
+                self.ensure_nft_rule(false)?;
+                self.ensure_nft_rule(true)?;
+            }
+            FirewallBackend::IptablesIpset => {
+                self.ensure_ipset_rule(false)?;
+                self.ensure_ipset_rule(true)?;
+            }
+            _ => {}
         }
         Ok(())
     }
 
     fn ban(&self, ip: IpAddr) -> anyhow::Result<()> {
         match self.config.backend {
+            FirewallBackend::Nftables => {
+                self.run_tolerating(&nft_ban_command(&self.config, ip), &["File exists"])
+            }
             FirewallBackend::Ufw => self.run_required(&ufw_ban_command(&self.config, ip)),
             FirewallBackend::Iptables => self.ensure_iptables_drop(ip),
             FirewallBackend::IptablesIpset => {
@@ -104,6 +118,10 @@ impl<R: CommandRunner> Firewall for SystemFirewall<R> {
 
     fn unban(&self, ip: IpAddr) -> anyhow::Result<()> {
         match self.config.backend {
+            FirewallBackend::Nftables => self.run_tolerating(
+                &nft_unban_command(&self.config, ip),
+                &["No such file or directory", "No such file"],
+            ),
             FirewallBackend::Ufw => self.run_required(&ufw_unban_command(&self.config, ip)),
             FirewallBackend::Iptables => {
                 self.run_required(&iptables_unban_command(&self.config, ip))
@@ -148,9 +166,74 @@ impl<R: CommandRunner> SystemFirewall<R> {
         self.run_required(&iptables_ban_command(&self.config, ip))
     }
 
+    fn ensure_nft_rule(&self, ipv6: bool) -> anyhow::Result<()> {
+        let check = nft_chain_check_command(&self.config);
+        let check_result = self.runner.run(&check)?;
+        if !check_result.success {
+            return self.run_required(&nft_rule_add_command(&self.config, ipv6));
+        }
+
+        let expected_fragment = nft_rule_fragment(&self.config, ipv6);
+        if check_result.stdout.contains(&expected_fragment) {
+            return Ok(());
+        }
+
+        self.run_required(&nft_rule_add_command(&self.config, ipv6))
+    }
+
+    fn ensure_nft_table(&self) -> anyhow::Result<()> {
+        let check = nft_table_check_command(&self.config);
+        let check_result = self.runner.run(&check)?;
+        if check_result.success {
+            return Ok(());
+        }
+        self.run_required(&nft_table_add_command(&self.config))
+    }
+
+    fn ensure_nft_chain(&self) -> anyhow::Result<()> {
+        let check = nft_chain_check_command(&self.config);
+        let check_result = self.runner.run(&check)?;
+        if check_result.success {
+            return Ok(());
+        }
+        self.run_required(&nft_chain_add_command(&self.config))
+    }
+
+    fn ensure_nft_set(&self, ipv6: bool) -> anyhow::Result<()> {
+        let check = nft_set_check_command(&self.config, ipv6);
+        let check_result = self.runner.run(&check)?;
+        if check_result.success {
+            return Ok(());
+        }
+        self.run_required(&nft_set_add_command(&self.config, ipv6))
+    }
+
     fn run_required(&self, command: &CommandSpec) -> anyhow::Result<()> {
         let result = self.runner.run(command)?;
         if result.success {
+            return Ok(());
+        }
+
+        bail!(
+            "command failed: {} {}; status={:?}; stderr={}",
+            command.program,
+            command.args.join(" "),
+            result.status_code,
+            result.stderr
+        );
+    }
+
+    fn run_tolerating(
+        &self,
+        command: &CommandSpec,
+        tolerated_stderr_fragments: &[&str],
+    ) -> anyhow::Result<()> {
+        let result = self.runner.run(command)?;
+        if result.success
+            || tolerated_stderr_fragments
+                .iter()
+                .any(|fragment| result.stderr.contains(fragment))
+        {
             return Ok(());
         }
 
@@ -166,6 +249,7 @@ impl<R: CommandRunner> SystemFirewall<R> {
 
 pub fn planned_ban_commands(config: &FirewallConfig, ip: IpAddr) -> Vec<CommandSpec> {
     match config.backend {
+        FirewallBackend::Nftables => vec![nft_ban_command(config, ip)],
         FirewallBackend::Ufw => vec![ufw_ban_command(config, ip)],
         FirewallBackend::Iptables => vec![
             iptables_check_command(config, ip),
@@ -178,6 +262,7 @@ pub fn planned_ban_commands(config: &FirewallConfig, ip: IpAddr) -> Vec<CommandS
 
 pub fn planned_unban_commands(config: &FirewallConfig, ip: IpAddr) -> Vec<CommandSpec> {
     match config.backend {
+        FirewallBackend::Nftables => vec![nft_unban_command(config, ip)],
         FirewallBackend::Ufw => vec![ufw_unban_command(config, ip)],
         FirewallBackend::Iptables => vec![iptables_unban_command(config, ip)],
         FirewallBackend::IptablesIpset => vec![ipset_delete_command(config, ip)],
@@ -218,6 +303,89 @@ pub fn ipset_setup_commands(config: &FirewallConfig) -> Vec<CommandSpec> {
             ],
         ),
     ]
+}
+
+fn nft_table_check_command(config: &FirewallConfig) -> CommandSpec {
+    CommandSpec::new(
+        &config.nft_binary,
+        ["list", "table", "inet", &config.nft_table],
+    )
+}
+
+fn nft_table_add_command(config: &FirewallConfig) -> CommandSpec {
+    CommandSpec::new(
+        &config.nft_binary,
+        ["add", "table", "inet", &config.nft_table],
+    )
+}
+
+fn nft_chain_check_command(config: &FirewallConfig) -> CommandSpec {
+    CommandSpec::new(
+        &config.nft_binary,
+        [
+            "list",
+            "chain",
+            "inet",
+            &config.nft_table,
+            &config.nft_chain,
+        ],
+    )
+}
+
+fn nft_chain_add_command(config: &FirewallConfig) -> CommandSpec {
+    CommandSpec::new(
+        &config.nft_binary,
+        [
+            "add",
+            "chain",
+            "inet",
+            &config.nft_table,
+            &config.nft_chain,
+            "{",
+            "type",
+            "filter",
+            "hook",
+            &config.nft_hook,
+            "priority",
+            &config.nft_priority,
+            ";",
+            "policy",
+            "accept",
+            ";",
+            "}",
+        ],
+    )
+}
+
+fn nft_set_check_command(config: &FirewallConfig, ipv6: bool) -> CommandSpec {
+    CommandSpec::new(
+        &config.nft_binary,
+        [
+            "list",
+            "set",
+            "inet",
+            &config.nft_table,
+            nft_set_name_for(config, ipv6),
+        ],
+    )
+}
+
+fn nft_set_add_command(config: &FirewallConfig, ipv6: bool) -> CommandSpec {
+    CommandSpec::new(
+        &config.nft_binary,
+        [
+            "add",
+            "set",
+            "inet",
+            &config.nft_table,
+            nft_set_name_for(config, ipv6),
+            "{",
+            "type",
+            nft_set_type(ipv6),
+            ";",
+            "}",
+        ],
+    )
 }
 
 fn ufw_ban_command(config: &FirewallConfig, ip: IpAddr) -> CommandSpec {
@@ -275,6 +443,79 @@ fn ipset_name_for(config: &FirewallConfig, ip: IpAddr) -> &str {
         IpAddr::V4(_) => &config.ipset_name_v4,
         IpAddr::V6(_) => &config.ipset_name_v6,
     }
+}
+
+fn nft_set_name_for(config: &FirewallConfig, ipv6: bool) -> &str {
+    if ipv6 {
+        &config.nft_set_name_v6
+    } else {
+        &config.nft_set_name_v4
+    }
+}
+
+fn nft_set_type(ipv6: bool) -> &'static str {
+    if ipv6 { "ipv6_addr" } else { "ipv4_addr" }
+}
+
+fn nft_rule_family(ipv6: bool) -> &'static str {
+    if ipv6 { "ip6" } else { "ip" }
+}
+
+fn nft_rule_fragment(config: &FirewallConfig, ipv6: bool) -> String {
+    format!(
+        "{} saddr @{} drop",
+        nft_rule_family(ipv6),
+        nft_set_name_for(config, ipv6)
+    )
+}
+
+fn nft_ban_command(config: &FirewallConfig, ip: IpAddr) -> CommandSpec {
+    CommandSpec::new(
+        &config.nft_binary,
+        [
+            "add",
+            "element",
+            "inet",
+            &config.nft_table,
+            nft_set_name_for(config, matches!(ip, IpAddr::V6(_))),
+            "{",
+            &ip.to_string(),
+            "}",
+        ],
+    )
+}
+
+fn nft_unban_command(config: &FirewallConfig, ip: IpAddr) -> CommandSpec {
+    CommandSpec::new(
+        &config.nft_binary,
+        [
+            "delete",
+            "element",
+            "inet",
+            &config.nft_table,
+            nft_set_name_for(config, matches!(ip, IpAddr::V6(_))),
+            "{",
+            &ip.to_string(),
+            "}",
+        ],
+    )
+}
+
+fn nft_rule_add_command(config: &FirewallConfig, ipv6: bool) -> CommandSpec {
+    CommandSpec::new(
+        &config.nft_binary,
+        [
+            "add",
+            "rule",
+            "inet",
+            &config.nft_table,
+            &config.nft_chain,
+            nft_rule_family(ipv6),
+            "saddr",
+            &format!("@{}", nft_set_name_for(config, ipv6)),
+            "drop",
+        ],
+    )
 }
 
 fn ipset_add_command(config: &FirewallConfig, ip: IpAddr) -> CommandSpec {
@@ -350,6 +591,9 @@ fn ipset_rule_insert_command(config: &FirewallConfig, ipv6: bool) -> CommandSpec
 
 pub fn backend_scaling_note(backend: &FirewallBackend) -> &'static str {
     match backend {
+        FirewallBackend::Nftables => {
+            "one nftables table with native address sets; recommended for modern Debian and Ubuntu"
+        }
         FirewallBackend::IptablesIpset => {
             "one iptables rule plus O(1)-style ipset membership checks; recommended for many IPs"
         }
@@ -375,7 +619,7 @@ pub fn log_firewall_backend(config: &FirewallConfig) {
     ) {
         warn!(
             backend = ?config.backend,
-            "large ban lists are more efficient with firewall.backend = \"iptables_ipset\""
+            "large ban lists are more efficient with firewall.backend = \"nftables\" or \"iptables_ipset\""
         );
     }
 }
@@ -392,8 +636,81 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ipset_setup_creates_ipv4_and_ipv6_sets() {
+    fn nft_setup_uses_table_chain_and_sets() {
         let config = FirewallConfig::default();
+
+        assert_eq!(
+            nft_table_add_command(&config),
+            CommandSpec::new("nft", ["add", "table", "inet", "honeypot"])
+        );
+        assert_eq!(
+            nft_set_add_command(&config, false),
+            CommandSpec::new(
+                "nft",
+                [
+                    "add",
+                    "set",
+                    "inet",
+                    "honeypot",
+                    "banned_v4",
+                    "{",
+                    "type",
+                    "ipv4_addr",
+                    ";",
+                    "}",
+                ]
+            )
+        );
+        assert_eq!(
+            nft_rule_add_command(&config, true),
+            CommandSpec::new(
+                "nft",
+                [
+                    "add",
+                    "rule",
+                    "inet",
+                    "honeypot",
+                    "input",
+                    "ip6",
+                    "saddr",
+                    "@banned_v6",
+                    "drop",
+                ]
+            )
+        );
+    }
+
+    #[test]
+    fn nft_ban_uses_single_add_element_command() {
+        let config = FirewallConfig::default();
+        let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10));
+
+        let commands = planned_ban_commands(&config, ip);
+
+        assert_eq!(
+            commands,
+            vec![CommandSpec::new(
+                "nft",
+                [
+                    "add",
+                    "element",
+                    "inet",
+                    "honeypot",
+                    "banned_v4",
+                    "{",
+                    "203.0.113.10",
+                    "}",
+                ]
+            )]
+        );
+    }
+
+    #[test]
+    fn ipset_setup_creates_ipv4_and_ipv6_sets() {
+        let config = FirewallConfig {
+            backend: FirewallBackend::IptablesIpset,
+            ..FirewallConfig::default()
+        };
         let commands = ipset_setup_commands(&config);
 
         assert_eq!(commands.len(), 2);
@@ -410,7 +727,10 @@ mod tests {
 
     #[test]
     fn ipset_ban_uses_single_set_add_command() {
-        let config = FirewallConfig::default();
+        let config = FirewallConfig {
+            backend: FirewallBackend::IptablesIpset,
+            ..FirewallConfig::default()
+        };
         let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10));
 
         let commands = planned_ban_commands(&config, ip);

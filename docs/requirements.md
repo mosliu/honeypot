@@ -33,7 +33,8 @@
 - Port 22 can be used by setting `honeypot.listen_addr = "0.0.0.0:22"`. The current implementation can mimic an OpenSSH banner and timing, but does not implement a complete SSH key exchange.
 - WebDAV sync is optional. When enabled, the program uploads a complete JSON snapshot of all banned IPs using HTTP `PUT`.
 - Logging uses the `tracing` ecosystem and writes daily rolling log files under the configured directory.
-- For many banned IPs, `firewall.backend = "iptables_ipset"` is the recommended mode. It keeps one iptables rule and stores IP membership in ipset hash sets.
+- For modern Debian/Ubuntu systems, `firewall.backend = "nftables"` is the recommended mode. It uses native nftables sets without requiring `ipset`.
+- `firewall.backend = "iptables_ipset"` remains available as a compatibility-focused high-volume mode. It keeps one iptables rule and stores IP membership in ipset hash sets.
 
 ## Operational Assumptions
 
@@ -41,6 +42,7 @@
 - Debian/Ubuntu packages may need to be installed before use:
   - `ufw` for `firewall.backend = "ufw"`.
   - `iptables` for `firewall.backend = "iptables"`.
+  - `nftables` for `firewall.backend = "nftables"`.
   - `iptables` and `ipset` for `firewall.backend = "iptables_ipset"`.
   - `curl` when `webdav.enabled = true`.
 - `iptables` rules and `ipset` contents can be restored by this program when it starts, based on the local state file. If bans must survive a machine reboot before the service starts, configure this program as a system service or use the distribution's firewall persistence tooling.

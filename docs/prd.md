@@ -2,14 +2,14 @@
 
 ## Summary
 
-Build a lightweight Rust honeypot for Debian/Ubuntu servers. The service listens on a configured TCP address, counts visits by source IP in a configurable sliding time window, permanently bans abusive IPs through a configurable firewall backend, exposes a password-protected admin API for unbanning, optionally uploads the complete banned IP list to WebDAV, and records security events in configurable rolling logs.
+Build a lightweight Rust honeypot for Debian/Ubuntu servers. The service listens on a configured TCP address, counts visits by source IP in a configurable sliding time window, permanently bans abusive IPs through a configurable firewall backend, exposes a password-protected admin API for unbanning, optionally uploads the complete banned IP list to WebDAV, and records security events in configurable rolling logs. Modern Debian/Ubuntu deployments should prefer native `nftables`.
 
 ## Goals
 
 - Provide a simple deployable binary for Debian/Ubuntu.
 - Detect repeated access to a configured honeypot port.
 - Ban abusive IPs permanently until explicitly unbanned.
-- Support `ufw`, plain `iptables`, and an efficient high-volume `iptables + ipset` mode.
+- Support native `nftables`, `ufw`, plain `iptables`, and an efficient high-volume `iptables + ipset` mode.
 - Persist banned IP state locally and restore it on service startup.
 - Provide a minimal password-protected HTTP admin interface.
 - Optionally serve the admin interface on the honeypot listener under a configured hidden path.
@@ -47,6 +47,11 @@ Build a lightweight Rust honeypot for Debian/Ubuntu servers. The service listens
 
 ### Firewall Ban Backends
 
+- `nftables` mode:
+  - Creates an `inet` table, input chain, and IPv4/IPv6 address sets with `nft`.
+  - Adds one IPv4 rule and one IPv6 rule that drop packets whose source address exists in the sets.
+  - Adds/removes banned IPs with `nft add element` and `nft delete element`.
+  - Recommended default for Ubuntu 24, Debian 13, and similar systems that already use the nf_tables backend.
 - `ufw` mode:
   - Ban: `ufw prepend deny from <ip>`
   - Unban: `ufw delete deny from <ip>`
@@ -158,7 +163,7 @@ Build a lightweight Rust honeypot for Debian/Ubuntu servers. The service listens
 - Ban operations should be queued and processed outside the connection accept path.
 - Visit tracking should keep only timestamps inside the configured sliding window.
 - `honeypot.max_tracked_ips` limits in-memory tracking growth.
-- The default backend should be `iptables_ipset` for large IP volumes.
+- The default backend should be `nftables` for modern Debian/Ubuntu systems.
 
 ### Reliability
 

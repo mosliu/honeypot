@@ -19,11 +19,19 @@ inline_probe_timeout_ms = 250
 
 [firewall]
 # Options:
+# - "nftables": recommended for modern Debian/Ubuntu.
 # - "iptables_ipset": recommended for large ban lists.
 # - "iptables": simple one-rule-per-IP mode.
 # - "ufw": convenient one-rule-per-IP mode.
 # - "dry_run": no firewall changes, useful for local development.
-backend = "iptables_ipset"
+backend = "nftables"
+nft_binary = "nft"
+nft_table = "honeypot"
+nft_chain = "input"
+nft_hook = "input"
+nft_priority = "filter"
+nft_set_name_v4 = "banned_v4"
+nft_set_name_v6 = "banned_v6"
 ufw_binary = "ufw"
 iptables_binary = "iptables"
 ip6tables_binary = "ip6tables"

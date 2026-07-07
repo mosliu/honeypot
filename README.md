@@ -1,6 +1,6 @@
 # honeypot
 
-Rust 编写的 Debian/Ubuntu 蜜罐服务。程序监听一个配置端口，按来源 IP 统计访问次数；当某个 IP 在配置时间窗口内达到阈值后，通过 `ufw`、`iptables` 或推荐的 `iptables + ipset` 后端永久封禁该 IP，直到通过管理 API 解封。
+Rust 编写的 Debian/Ubuntu 蜜罐服务。程序监听一个配置端口，按来源 IP 统计访问次数；当某个 IP 在配置时间窗口内达到阈值后，通过 `nftables`、`ufw`、`iptables` 或 `iptables + ipset` 后端永久封禁该 IP，直到通过管理 API 解封。
 
 ## 功能
 
@@ -9,7 +9,8 @@ Rust 编写的 Debian/Ubuntu 蜜罐服务。程序监听一个配置端口，按
 - 可配置监听地址、访问阈值和统计窗口。
 - 白名单支持纯 IP 和 CIDR，例如 `127.0.0.1`、`::1`、`172.23.16.0/24`。
 - 防火墙后端：
-  - `iptables_ipset`：推荐默认值，适合大量 IP。
+  - `nftables`：现代 Debian/Ubuntu 的推荐默认值。
+  - `iptables_ipset`：高性能兼容方案，适合大量 IP。
   - `iptables`：每个 IP 一条 DROP 规则。
   - `ufw`：每个 IP 一条 UFW deny 规则。
   - `dry_run`：只记录日志，不修改防火墙。
@@ -39,7 +40,7 @@ cargo run -- --config config.toml
 
 - 将 `admin.password` 改成长随机密码。
 - 将 `honeypot.allowlist` 设置为永不封禁的 IP 或 CIDR。
-- 根据规模选择 `firewall.backend`，大量 IP 建议使用 `iptables_ipset`。
+- 根据规模选择 `firewall.backend`，Ubuntu 24 / Debian 13 这类系统建议优先使用 `nftables`。
 - 如果需要 WebDAV，同步配置 `webdav.enabled`、`webdav.url`、`webdav.username`、`webdav.password`。
 - 根据运维策略配置 `logging.directory`、`logging.level`、`logging.retention_files`、`logging.retention_days`。
 
@@ -90,7 +91,7 @@ cargo clippy --all-targets -- -D warnings
 
 ```bash
 sudo apt update
-sudo apt install -y build-essential curl iptables ipset ufw
+sudo apt install -y build-essential curl nftables iptables ipset ufw
 ```
 
 编译：
@@ -108,6 +109,7 @@ sudo ./target/release/honeypot --config config.toml
 说明：
 
 - 非 `dry_run` 模式需要 root 或等效权限修改防火墙。
+- `nftables` 后端需要系统安装 `nft` 命令，Ubuntu 24 / Debian 13 推荐使用这个后端。
 - `iptables_ipset` 需要 `iptables`、`ip6tables` 和 `ipset`。
 - `ufw` 后端需要系统安装并启用 UFW。
 - `webdav.enabled = true` 时需要目标系统有 `curl`。
@@ -331,7 +333,13 @@ curl 'http://127.0.0.1:8080/health'
 
 ## 防火墙后端选择
 
-`iptables_ipset` 是默认推荐：
+`nftables` 是现代 Debian/Ubuntu 的默认推荐：
+
+- 使用内核原生 `nftables` 表、链和地址集合。
+- 不需要额外依赖 `ipset`。
+- 对 Ubuntu 24 这类 `iptables-nft` 环境更直接。
+
+`iptables_ipset` 是兼容性很好的高性能备选：
 
 - iptables/ip6tables 只维护常量数量的规则。
 - IP 放在内核 ipset 哈希集合里。
@@ -370,7 +378,7 @@ listen_addr = "127.0.0.1:8080"
 password = "replace-with-a-long-random-password"
 
 [firewall]
-backend = "iptables_ipset"
+backend = "nftables"
 ```
 
 完整模板见 `config.example.toml`。

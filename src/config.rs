@@ -68,6 +68,28 @@ impl AppConfig {
             self.firewall.ipset_max_elements > 0,
             "firewall.ipset_max_elements must be greater than 0"
         );
+        if self.firewall.backend == FirewallBackend::Nftables {
+            ensure!(
+                !self.firewall.nft_table.trim().is_empty(),
+                "firewall.nft_table must not be empty"
+            );
+            ensure!(
+                !self.firewall.nft_chain.trim().is_empty(),
+                "firewall.nft_chain must not be empty"
+            );
+            ensure!(
+                !self.firewall.nft_hook.trim().is_empty(),
+                "firewall.nft_hook must not be empty"
+            );
+            ensure!(
+                !self.firewall.nft_set_name_v4.trim().is_empty(),
+                "firewall.nft_set_name_v4 must not be empty"
+            );
+            ensure!(
+                !self.firewall.nft_set_name_v6.trim().is_empty(),
+                "firewall.nft_set_name_v6 must not be empty"
+            );
+        }
         if self.webdav.enabled {
             ensure!(!self.webdav.url.trim().is_empty(), "webdav.url must be set");
         }
@@ -131,9 +153,10 @@ impl Default for AdminConfig {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum FirewallBackend {
+    #[default]
+    Nftables,
     Ufw,
     Iptables,
-    #[default]
     IptablesIpset,
     DryRun,
 }
@@ -142,6 +165,13 @@ pub enum FirewallBackend {
 #[serde(default)]
 pub struct FirewallConfig {
     pub backend: FirewallBackend,
+    pub nft_binary: String,
+    pub nft_table: String,
+    pub nft_chain: String,
+    pub nft_hook: String,
+    pub nft_priority: String,
+    pub nft_set_name_v4: String,
+    pub nft_set_name_v6: String,
     pub ufw_binary: String,
     pub iptables_binary: String,
     pub ip6tables_binary: String,
@@ -157,7 +187,14 @@ pub struct FirewallConfig {
 impl Default for FirewallConfig {
     fn default() -> Self {
         Self {
-            backend: FirewallBackend::IptablesIpset,
+            backend: FirewallBackend::Nftables,
+            nft_binary: "nft".to_string(),
+            nft_table: "honeypot".to_string(),
+            nft_chain: "input".to_string(),
+            nft_hook: "input".to_string(),
+            nft_priority: "filter".to_string(),
+            nft_set_name_v4: "banned_v4".to_string(),
+            nft_set_name_v6: "banned_v6".to_string(),
             ufw_binary: "ufw".to_string(),
             iptables_binary: "iptables".to_string(),
             ip6tables_binary: "ip6tables".to_string(),
