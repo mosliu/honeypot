@@ -5,14 +5,21 @@ Wants=network-online.target
 After=network-online.target
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
 User=root
 Group=root
 WorkingDirectory=/var/lib/honeypot
 ExecStart=/usr/local/bin/honeypot --config /etc/honeypot/config.toml
 Restart=on-failure
 RestartSec=5s
-LimitNOFILE=1048576
+TimeoutStartSec=300s
+TimeoutStopSec=120s
+LimitNOFILE=65536
+TasksMax=4096
+MemoryMax=1G
+UMask=0077
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target

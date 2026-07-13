@@ -23,16 +23,19 @@
 - The local banned IP state is persisted to `state.banned_ips_path` as JSON and restored on startup.
 - The admin API listens on `admin.listen_addr`.
 - The admin API supports:
-  - `POST /unban` with JSON body `{"ip":"203.0.113.10","password":"..."}`.
-  - `GET /unban?ip=203.0.113.10&password=...`.
-  - `GET /banned?password=...`.
+  - `POST /unban` with `Authorization: Bearer <password>` and JSON body `{"ip":"203.0.113.10"}`.
+  - `GET /banned` with Bearer authentication.
   - `GET /health`.
 - `honeypot.allowlist` supports exact IP entries and CIDR entries, for example `127.0.0.1`, `::1`, and `172.23.16.0/24`.
-- `admin.inline_on_honeypot_port = true` serves admin endpoints on the honeypot listener under `admin.inline_path_prefix`.
-- `scripts/install-service.sh` installs the release binary, config, and systemd unit.
+- `admin.inline_on_honeypot_port = true` serves admin endpoints on the honeypot listener only for allowlisted source IPs. Public plaintext use requires an explicit insecure-HTTP opt-in.
+- `scripts/install-service.sh` validates configuration before replacement and transactionally installs the release binary, config, documentation, and systemd unit.
+- The systemd service reports ready only after firewall restoration and all required listeners complete startup.
 - Port 22 can be used by setting `honeypot.listen_addr = "0.0.0.0:22"`. The current implementation can mimic an OpenSSH banner and timing, but does not implement a complete SSH key exchange.
 - WebDAV sync is optional. When enabled, the program uploads a complete JSON snapshot of all banned IPs using HTTP `PUT`.
-- Logging uses the `tracing` ecosystem and writes daily rolling log files under the configured directory.
+- WebDAV notifications retain only the latest snapshot, retry failures with bounded exponential backoff, and never block local firewall operations.
+- Logging uses the `tracing` ecosystem, writes daily rolling log files, and enforces retention periodically while running.
+- Runtime state uses an atomic snapshot, incremental journal, and pending intent so interrupted firewall changes can be recovered; state files are owner-only on Unix.
+- Connection concurrency, per-IP visit history, and the pending ban queue are explicitly bounded.
 - For modern Debian/Ubuntu systems, `firewall.backend = "nftables"` is the recommended mode. It uses native nftables sets without requiring `ipset`.
 - `firewall.backend = "iptables_ipset"` remains available as a compatibility-focused high-volume mode. It keeps one iptables rule and stores IP membership in ipset hash sets.
 

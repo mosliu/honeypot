@@ -36,13 +36,13 @@ jobs:
         run: cargo fmt --check
 
       - name: Run clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Run tests
-        run: cargo test
+        run: cargo test --locked --all-targets --all-features
 
       - name: Build release binary
-        run: cargo build --release
+        run: cargo build --locked --release
 
   release-build:
     name: Build release artifact (${{ matrix.target }})
@@ -95,7 +95,7 @@ jobs:
         run: echo "${{ matrix.linker_env }}=${{ matrix.linker }}" >> "$GITHUB_ENV"
 
       - name: Build target
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --locked --release --target ${{ matrix.target }}
 
       - name: Package artifact
         run: |
@@ -104,6 +104,7 @@ jobs:
           cp "target/${{ matrix.target }}/release/honeypot" "$package_dir/"
           cp README.md config.example.toml "$package_dir/"
           cp -r docs "$package_dir/"
+          cp -r scripts packaging "$package_dir/"
           tar -czf "dist/${{ matrix.archive }}" -C dist "honeypot-${{ matrix.target }}"
           sha256sum "dist/${{ matrix.archive }}" > "dist/${{ matrix.archive }}.sha256"
 

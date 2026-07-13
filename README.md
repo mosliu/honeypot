@@ -15,9 +15,10 @@ Rust 编写的 Debian/Ubuntu 蜜罐服务。程序监听一个配置端口，按
   - `ufw`：每个 IP 一条 UFW deny 规则。
   - `dry_run`：只记录日志，不修改防火墙。
 - 本地持久化已封禁 IP，启动时自动恢复。
-- 管理 API 支持密码解封 IP 和查看封禁列表。
+- 管理 API 支持 Bearer 密码认证、解封 IP 和查看封禁列表。
 - 可选 WebDAV 同步，将完整封禁列表 PUT 到远端。
 - 使用 `tracing` 日志框架，支持日志目录、级别、保留文件数、保留天数配置。
+- 有界连接数、LRU 访问跟踪、可靠去重封禁队列和可恢复状态 journal。
 - GitHub Actions 支持自动 CI 和 tag 发布 Release。
 
 ## 目录
@@ -38,11 +39,17 @@ cargo run -- --config config.toml
 
 生产运行前必须修改 `config.toml`：
 
-- 将 `admin.password` 改成长随机密码。
+- 将 `admin.password` 改为至少 16 个字符的长随机密码；占位密码会被拒绝。
 - 将 `honeypot.allowlist` 设置为永不封禁的 IP 或 CIDR。
 - 根据规模选择 `firewall.backend`，Ubuntu 24 / Debian 13 这类系统建议优先使用 `nftables`。
 - 如果需要 WebDAV，同步配置 `webdav.enabled`、`webdav.url`、`webdav.username`、`webdav.password`。
 - 根据运维策略配置 `logging.directory`、`logging.level`、`logging.retention_files`、`logging.retention_days`。
+
+启动前可以只验证配置，不修改防火墙或监听端口：
+
+```bash
+cargo run -- --config config.toml --check-config
+```
 
 本地开发时建议先使用：
 
@@ -81,8 +88,8 @@ target/release/honeypot.exe
 
 ```bash
 cargo fmt --check
-cargo test
-cargo clippy --all-targets -- -D warnings
+cargo test --locked --all-targets --all-features
+cargo clippy --locked --all-targets --all-features -- -D warnings
 ```
 
 ## Debian/Ubuntu 编译和运行
@@ -149,6 +156,10 @@ sudo scripts/install-service.sh --config config.toml --start
 - 创建 `/var/lib/honeypot` 和 `/var/log/honeypot`。
 - 执行 `systemctl daemon-reload`。
 - 执行 `systemctl enable honeypot.service`。
+- 在覆盖现有安装前使用新二进制校验配置；安装或 `--start` 任一阶段失败时恢复旧文件以及原有 active/enabled 状态。
+- 使用 systemd `Type=notify`；防火墙状态恢复且全部必需监听器就绪后，服务才进入 active 状态。
+
+未传入 `--config` 时会安装 `packaging/config.toml` 生产模板，但不会允许用模板密码直接 `--start`。
 
 常用运维命令：
 
@@ -171,22 +182,29 @@ password = "replace-with-a-long-random-password"
 inline_on_honeypot_port = true
 inline_path_prefix = "/_honeypot_admin"
 inline_probe_timeout_ms = 250
+inline_request_timeout_ms = 3000
+inline_max_request_bytes = 16384
+allow_insecure_http = true
 ```
 
-启用后，不再启动独立 admin 端口。管理接口会挂在蜜罐监听端口的隐藏路径下：
+启用后，不再启动独立 admin 端口。管理接口只对 `honeypot.allowlist` 中的来源开放。由于 inline 模式是明文 HTTP，公开监听时必须显式设置 `allow_insecure_http = true`，并应仅通过 VPN 或受信网络使用：
 
 ```bash
-curl 'http://server-ip:22/_honeypot_admin/unban?ip=203.0.113.10&password=configured-password'
-curl 'http://server-ip:22/_honeypot_admin/banned?password=configured-password'
+curl -X POST 'http://server-ip:22/_honeypot_admin/unban' \
+  -H 'Authorization: Bearer configured-password' \
+  -H 'content-type: application/json' \
+  -d '{"ip":"203.0.113.10"}'
+curl 'http://server-ip:22/_honeypot_admin/banned' \
+  -H 'Authorization: Bearer configured-password'
 curl 'http://server-ip:22/_honeypot_admin/health'
 ```
 
 注意：
 
 - 如果某个来源 IP 已被防火墙封禁，它无法从同一个来源 IP 访问 inline 解封接口，因为防火墙会先挡住连接。
-- 管理方 IP 应该加入 `honeypot.allowlist`。
+- 管理方 IP 必须加入 `honeypot.allowlist`；隐藏路径不是访问控制机制。
 - inline 模式会在蜜罐端口上短暂探测 HTTP 管理请求；普通 SSH 探测和非隐藏路径请求仍按蜜罐连接处理。
-- 从安全角度，默认的独立本地管理端口更稳妥；inline 模式适合端口受限或临时运维场景。
+- 默认的独立回环管理端口更稳妥；非回环明文管理监听必须显式启用 `admin.allow_insecure_http`。
 
 ## 22 端口部署和拟真限制
 
@@ -284,8 +302,8 @@ cargo test
 推荐用 tag 触发发布，而不是每个提交都发布 Release：
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
 GitHub Release 会包含：
@@ -309,23 +327,23 @@ Settings -> Actions -> General -> Workflow permissions -> Read and write permiss
 
 ```bash
 curl -X POST http://127.0.0.1:8080/unban \
+  -H 'Authorization: Bearer configured-password' \
   -H 'content-type: application/json' \
-  -d '{"ip":"203.0.113.10","password":"configured-password"}'
-```
-
-也可以用 GET：
-
-```bash
-curl 'http://127.0.0.1:8080/unban?ip=203.0.113.10&password=configured-password'
+  -d '{"ip":"203.0.113.10"}'
 ```
 
 查看当前封禁列表：
 
 ```bash
-curl 'http://127.0.0.1:8080/banned?password=configured-password'
+curl http://127.0.0.1:8080/banned \
+  -H 'Authorization: Bearer configured-password'
 ```
 
-健康检查：
+0.2 的查询字符串密码接口默认关闭。如需短期迁移，可以设置 `admin.allow_legacy_get_password = true`；查询参数容易进入历史和日志，不应长期启用。
+
+状态持久化由 `state.banned_ips_path` 快照、同路径的 `.journal` 增量日志和 `.pending` 恢复意图组成。Unix 上这些文件固定使用 `0600` 权限；正常关闭和启动恢复后会压缩 journal。不要只复制其中一个文件作为在线备份。
+
+健康检查不需要认证：
 
 ```bash
 curl 'http://127.0.0.1:8080/health'
@@ -370,15 +388,20 @@ listen_addr = "0.0.0.0:2222"
 max_visits = 5
 window_seconds = 60
 max_tracked_ips = 100000
+max_concurrent_connections = 1024
+ban_queue_capacity = 4096
 allowlist = ["127.0.0.1", "::1", "172.23.16.0/24"]
 banner = "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3\r\n"
 
 [admin]
 listen_addr = "127.0.0.1:8080"
 password = "replace-with-a-long-random-password"
+allow_insecure_http = false
+allow_legacy_get_password = false
 
 [firewall]
 backend = "nftables"
+command_timeout_seconds = 15
 ```
 
 完整模板见 `config.example.toml`。

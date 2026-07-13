@@ -73,29 +73,22 @@ Build a lightweight Rust honeypot for Debian/Ubuntu servers. The service listens
 ### Admin API
 
 - The API binds to `admin.listen_addr`.
-- Requests must include `admin.password`.
+- Protected requests use `Authorization: Bearer <admin.password>`.
 - Endpoints:
   - `GET /health`
   - `POST /unban`
-  - `GET /unban`
   - `GET /banned`
 - `POST /unban` body:
 
 ```json
 {
-  "ip": "203.0.113.10",
-  "password": "configured-password"
+  "ip": "203.0.113.10"
 }
 ```
 
-- `GET /unban` query:
-
-```text
-/unban?ip=203.0.113.10&password=configured-password
-```
-
 - `GET /banned` returns the current persisted banned IP snapshot.
-- If `admin.inline_on_honeypot_port = true`, these endpoints are served on the honeypot listener under `admin.inline_path_prefix`, for example `http://host:22/_honeypot_admin/unban`.
+- Legacy query-string passwords are disabled by default and are available only through an explicit migration switch.
+- If `admin.inline_on_honeypot_port = true`, endpoints are served only to source IPs in `honeypot.allowlist`.
 
 ### State Persistence
 
@@ -107,6 +100,8 @@ Build a lightweight Rust honeypot for Debian/Ubuntu servers. The service listens
   - `banned_at`
   - `reason`
 - On startup, the service initializes the firewall backend and reapplies all persisted records.
+- Runtime changes append to a durable JSONL journal instead of rewriting the complete list for every event.
+- A pending intent is persisted before each firewall mutation and recovered after interruption; startup and graceful shutdown compact committed journal events into the snapshot.
 
 ### WebDAV Sync
 
@@ -117,7 +112,8 @@ Build a lightweight Rust honeypot for Debian/Ubuntu servers. The service listens
 - The transport uses the configured `webdav.curl_binary`, defaulting to `curl`.
 - The payload is a complete JSON snapshot, not an incremental patch.
 - Basic authentication is supported through `webdav.username` and `webdav.password`.
-- Failed uploads are logged and do not roll back local firewall state.
+- HTTPS is required unless insecure HTTP is explicitly enabled.
+- Sync keeps only the latest snapshot and retries failures without blocking local ban/unban operations.
 
 ### Logging
 
@@ -128,6 +124,7 @@ Build a lightweight Rust honeypot for Debian/Ubuntu servers. The service listens
 - Retention controls:
   - `logging.retention_files`
   - `logging.retention_days`
+- Retention cleanup runs periodically for the lifetime of the service.
 - Logs include:
   - firewall backend selection
   - threshold hits
@@ -141,11 +138,14 @@ Build a lightweight Rust honeypot for Debian/Ubuntu servers. The service listens
 - `scripts/install-service.sh` installs:
   - `/usr/local/bin/honeypot`
   - `/etc/honeypot/config.toml`
+  - `/etc/honeypot/README.md`
   - `/etc/systemd/system/honeypot.service`
   - `/var/lib/honeypot`
   - `/var/log/honeypot`
 - The installer enables `honeypot.service`.
 - The installer starts the service only when `--start` is provided.
+- The installer validates the selected configuration before replacement and restores files plus prior active/enabled state if any installation phase fails.
+- The systemd unit uses readiness notification and becomes active only after firewall restoration and all required listeners are ready.
 
 ### Port 22 SSH-Like Behavior
 
@@ -161,20 +161,24 @@ Build a lightweight Rust honeypot for Debian/Ubuntu servers. The service listens
 
 - The listener should avoid running firewall commands directly in the accept path.
 - Ban operations should be queued and processed outside the connection accept path.
-- Visit tracking should keep only timestamps inside the configured sliding window.
+- Ban queue entries should be deduplicated and must wait for bounded capacity instead of being discarded.
+- Visit tracking should keep at most `max_visits` timestamps per IP in a bounded LRU.
 - `honeypot.max_tracked_ips` limits in-memory tracking growth.
+- `honeypot.max_concurrent_connections` limits active connection tasks.
 - The default backend should be `nftables` for modern Debian/Ubuntu systems.
 
 ### Reliability
 
 - Firewall command failures must be logged and must not be written as successful bans.
-- Local state writes should be atomic enough for normal operation by writing a temporary file and renaming it.
-- Admin unban should update firewall first, then local state, then WebDAV.
+- Local state changes must use a recoverable pending intent and durable journal.
+- Ban and unban operations persist an intent, apply the firewall change, commit the journal event, then publish the latest WebDAV snapshot.
+- State file contents and directory metadata must be synchronized for crash recovery, and Unix state files must use mode `0600`.
 
 ### Security
 
 - The admin API should bind to localhost by default.
-- The admin password must not be empty.
+- The admin password must be explicitly configured, at least 16 characters, and must not be a documented placeholder.
+- Plaintext admin listeners must be loopback-only unless the operator explicitly accepts insecure remote HTTP.
 - The real `config.toml` should not be committed because it may contain secrets.
 - Error responses should not expose WebDAV credentials or firewall command output to API callers.
 
