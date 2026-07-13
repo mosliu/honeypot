@@ -1,6 +1,6 @@
 [package]
 name = "honeypot"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 
 [dependencies]
@@ -8,15 +8,22 @@ anyhow = "1.0"
 axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
+httparse = "1.10"
+lru = "0.16"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_urlencoded = "0.7"
+tempfile = "3.23"
 thiserror = "2.0"
-tokio = { version = "1.52", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1.52", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 toml = "0.9"
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+wait-timeout = "0.2"
+
+[target.'cfg(unix)'.dependencies]
+sd-notify = "0.5"
 
 [dev-dependencies]
-tempfile = "3.23"
+tower = { version = "0.5", features = ["util"] }

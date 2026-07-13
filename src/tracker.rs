@@ -1,6 +1,8 @@
+use lru::LruCache;
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::VecDeque,
     net::IpAddr,
+    num::NonZeroUsize,
     time::{Duration, Instant},
 };
 
@@ -14,19 +16,19 @@ pub enum VisitDecision {
 pub struct VisitTracker {
     window: Duration,
     max_visits: usize,
-    max_tracked_ips: usize,
-    visits: HashMap<IpAddr, VecDeque<Instant>>,
-    events_since_sweep: usize,
+    visits: LruCache<IpAddr, VecDeque<Instant>>,
 }
 
 impl VisitTracker {
     pub fn new(window: Duration, max_visits: usize, max_tracked_ips: usize) -> Self {
+        assert!(max_visits > 0, "max_visits must be greater than 0");
+        let max_tracked_ips =
+            NonZeroUsize::new(max_tracked_ips).expect("max_tracked_ips must be greater than 0");
+
         Self {
             window,
             max_visits,
-            max_tracked_ips,
-            visits: HashMap::new(),
-            events_since_sweep: 0,
+            visits: LruCache::new(max_tracked_ips),
         }
     }
 
@@ -35,22 +37,22 @@ impl VisitTracker {
     }
 
     pub fn record_at(&mut self, ip: IpAddr, now: Instant) -> VisitDecision {
-        self.events_since_sweep += 1;
-        if self.events_since_sweep >= self.max_tracked_ips.min(10_000) {
-            self.sweep(now);
-        }
-
-        if self.visits.len() >= self.max_tracked_ips && !self.visits.contains_key(&ip) {
-            self.sweep(now);
-            self.trim_to_limit();
+        if !self.visits.contains(&ip) {
+            self.visits.put(ip, VecDeque::new());
         }
 
         let cutoff = now.checked_sub(self.window).unwrap_or(now);
-        let entry = self.visits.entry(ip).or_default();
+        let entry = self
+            .visits
+            .get_mut(&ip)
+            .expect("visit entry must exist after insertion");
         while entry.front().is_some_and(|seen_at| *seen_at < cutoff) {
             entry.pop_front();
         }
 
+        if entry.len() == self.max_visits {
+            entry.pop_front();
+        }
         entry.push_back(now);
         let count = entry.len();
         if count >= self.max_visits {
@@ -62,35 +64,6 @@ impl VisitTracker {
 
     pub fn tracked_ip_count(&self) -> usize {
         self.visits.len()
-    }
-
-    fn sweep(&mut self, now: Instant) {
-        let cutoff = now.checked_sub(self.window).unwrap_or(now);
-        for visits in self.visits.values_mut() {
-            while visits.front().is_some_and(|seen_at| *seen_at < cutoff) {
-                visits.pop_front();
-            }
-        }
-        self.visits.retain(|_, visits| !visits.is_empty());
-        self.events_since_sweep = 0;
-    }
-
-    fn trim_to_limit(&mut self) {
-        if self.visits.len() < self.max_tracked_ips {
-            return;
-        }
-
-        let remove_count = self.visits.len() - self.max_tracked_ips + 1;
-        let mut oldest: Vec<(IpAddr, Instant)> = self
-            .visits
-            .iter()
-            .filter_map(|(ip, visits)| visits.back().copied().map(|last_seen| (*ip, last_seen)))
-            .collect();
-        oldest.sort_by_key(|(_, last_seen)| *last_seen);
-
-        for (ip, _) in oldest.into_iter().take(remove_count) {
-            self.visits.remove(&ip);
-        }
     }
 }
 
@@ -138,14 +111,63 @@ mod tests {
     }
 
     #[test]
-    fn evicts_oldest_ips_when_tracking_table_is_full() {
+    fn evicts_least_recently_used_ip_when_tracking_table_is_full() {
         let mut tracker = VisitTracker::new(Duration::from_secs(60), 10, 2);
         let start = Instant::now();
 
         tracker.record_at(ip(1), start);
         tracker.record_at(ip(2), start + Duration::from_secs(1));
-        tracker.record_at(ip(3), start + Duration::from_secs(2));
+        tracker.record_at(ip(1), start + Duration::from_secs(2));
+        tracker.record_at(ip(3), start + Duration::from_secs(3));
 
         assert_eq!(tracker.tracked_ip_count(), 2);
+        assert!(tracker.visits.contains(&ip(1)));
+        assert!(!tracker.visits.contains(&ip(2)));
+        assert!(tracker.visits.contains(&ip(3)));
+    }
+
+    #[test]
+    fn bounds_stored_events_for_one_ip_after_repeated_bans() {
+        let mut tracker = VisitTracker::new(Duration::from_secs(1_000), 3, 100);
+        let start = Instant::now();
+
+        for offset in 0..100 {
+            let decision = tracker.record_at(ip(10), start + Duration::from_secs(offset));
+            if offset >= 2 {
+                assert_eq!(decision, VisitDecision::Ban { count: 3 });
+            }
+        }
+
+        assert_eq!(tracker.visits.get(&ip(10)).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn banned_ip_recovers_after_its_stored_events_expire() {
+        let mut tracker = VisitTracker::new(Duration::from_secs(10), 3, 100);
+        let start = Instant::now();
+
+        tracker.record_at(ip(10), start);
+        tracker.record_at(ip(10), start + Duration::from_secs(1));
+        assert_eq!(
+            tracker.record_at(ip(10), start + Duration::from_secs(2)),
+            VisitDecision::Ban { count: 3 }
+        );
+        assert_eq!(
+            tracker.record_at(ip(10), start + Duration::from_secs(13)),
+            VisitDecision::Allow { count: 1 }
+        );
+    }
+
+    #[test]
+    fn never_exceeds_the_configured_ip_capacity() {
+        let mut tracker = VisitTracker::new(Duration::from_secs(60), 3, 8);
+        let start = Instant::now();
+
+        for last in 0..100 {
+            tracker.record_at(ip(last), start + Duration::from_secs(u64::from(last)));
+            assert!(tracker.tracked_ip_count() <= 8);
+        }
+
+        assert_eq!(tracker.tracked_ip_count(), 8);
     }
 }

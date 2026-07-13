@@ -3,8 +3,10 @@ use anyhow::{Context, bail};
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     process::Command,
+    time::Duration,
 };
 use tracing::{debug, info, warn};
+use wait_timeout::ChildExt;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommandSpec {
@@ -36,8 +38,21 @@ pub trait CommandRunner: Send + Sync {
     fn run(&self, command: &CommandSpec) -> anyhow::Result<CommandResult>;
 }
 
-#[derive(Default)]
-pub struct SystemCommandRunner;
+pub struct SystemCommandRunner {
+    timeout: Duration,
+}
+
+impl SystemCommandRunner {
+    pub fn new(timeout: Duration) -> Self {
+        Self { timeout }
+    }
+}
+
+impl Default for SystemCommandRunner {
+    fn default() -> Self {
+        Self::new(Duration::from_secs(15))
+    }
+}
 
 impl CommandRunner for SystemCommandRunner {
     fn run(&self, command: &CommandSpec) -> anyhow::Result<CommandResult> {
@@ -46,10 +61,27 @@ impl CommandRunner for SystemCommandRunner {
             args = ?command.args,
             "running firewall command"
         );
-        let output = Command::new(&command.program)
+        let mut child = Command::new(&command.program)
             .args(&command.args)
-            .output()
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
             .with_context(|| format!("failed to execute {}", command.program))?;
+        let status = child
+            .wait_timeout(self.timeout)
+            .with_context(|| format!("failed to wait for {}", command.program))?;
+        if status.is_none() {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!(
+                "firewall command timed out after {} seconds: {}",
+                self.timeout.as_secs(),
+                command.program
+            );
+        }
+        let output = child
+            .wait_with_output()
+            .with_context(|| format!("failed to collect output from {}", command.program))?;
         Ok(CommandResult {
             success: output.status.success(),
             status_code: output.status.code(),
@@ -122,10 +154,11 @@ impl<R: CommandRunner> Firewall for SystemFirewall<R> {
                 &nft_unban_command(&self.config, ip),
                 &["No such file or directory", "No such file"],
             ),
-            FirewallBackend::Ufw => self.run_required(&ufw_unban_command(&self.config, ip)),
-            FirewallBackend::Iptables => {
-                self.run_required(&iptables_unban_command(&self.config, ip))
-            }
+            FirewallBackend::Ufw => self.run_tolerating(
+                &ufw_unban_command(&self.config, ip),
+                &["Could not delete non-existent rule", "Rule not found"],
+            ),
+            FirewallBackend::Iptables => self.remove_iptables_drop(ip),
             FirewallBackend::IptablesIpset => {
                 self.run_required(&ipset_delete_command(&self.config, ip))
             }
@@ -164,6 +197,16 @@ impl<R: CommandRunner> SystemFirewall<R> {
         }
 
         self.run_required(&iptables_ban_command(&self.config, ip))
+    }
+
+    fn remove_iptables_drop(&self, ip: IpAddr) -> anyhow::Result<()> {
+        let check = iptables_check_command(&self.config, ip);
+        let check_result = self.runner.run(&check)?;
+        if !check_result.success {
+            return Ok(());
+        }
+
+        self.run_required(&iptables_unban_command(&self.config, ip))
     }
 
     fn ensure_nft_rule(&self, ipv6: bool) -> anyhow::Result<()> {
@@ -634,6 +677,49 @@ pub fn local_loopback_ips() -> [IpAddr; 2] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        collections::VecDeque,
+        sync::{Arc, Mutex},
+    };
+
+    #[derive(Clone, Default)]
+    struct RecordingRunner {
+        commands: Arc<Mutex<Vec<CommandSpec>>>,
+        results: Arc<Mutex<VecDeque<CommandResult>>>,
+    }
+
+    impl RecordingRunner {
+        fn with_results(results: impl IntoIterator<Item = CommandResult>) -> Self {
+            Self {
+                results: Arc::new(Mutex::new(results.into_iter().collect())),
+                ..Self::default()
+            }
+        }
+
+        fn commands(&self) -> Vec<CommandSpec> {
+            self.commands.lock().unwrap().clone()
+        }
+    }
+
+    impl CommandRunner for RecordingRunner {
+        fn run(&self, command: &CommandSpec) -> anyhow::Result<CommandResult> {
+            self.commands.lock().unwrap().push(command.clone());
+            self.results
+                .lock()
+                .unwrap()
+                .pop_front()
+                .context("test runner had no queued result")
+        }
+    }
+
+    fn command_result(success: bool, stderr: &str) -> CommandResult {
+        CommandResult {
+            success,
+            status_code: Some(if success { 0 } else { 1 }),
+            stdout: String::new(),
+            stderr: stderr.to_string(),
+        }
+    }
 
     #[test]
     fn nft_setup_uses_table_chain_and_sets() {
@@ -757,5 +843,53 @@ mod tests {
         assert_eq!(commands[0].args[0], "-C");
         assert_eq!(commands[1].args[0], "-I");
         assert_eq!(commands[1].args[2], "1");
+    }
+
+    #[test]
+    fn plain_iptables_unban_skips_delete_when_rule_is_absent() {
+        let config = FirewallConfig {
+            backend: FirewallBackend::Iptables,
+            ..FirewallConfig::default()
+        };
+        let runner = RecordingRunner::with_results([command_result(false, "rule not found")]);
+        let firewall = SystemFirewall::new(config, runner.clone());
+        let ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 8));
+
+        firewall.unban(ip).unwrap();
+
+        let commands = runner.commands();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].args[0], "-C");
+    }
+
+    #[test]
+    fn ufw_unban_tolerates_an_already_missing_rule() {
+        let config = FirewallConfig {
+            backend: FirewallBackend::Ufw,
+            ..FirewallConfig::default()
+        };
+        let runner = RecordingRunner::with_results([command_result(false, "Rule not found")]);
+        let firewall = SystemFirewall::new(config, runner.clone());
+        let ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9));
+
+        firewall.unban(ip).unwrap();
+        assert_eq!(
+            runner.commands(),
+            vec![ufw_unban_command(&firewall.config, ip)]
+        );
+    }
+
+    #[test]
+    fn ufw_unban_propagates_unexpected_failures() {
+        let config = FirewallConfig {
+            backend: FirewallBackend::Ufw,
+            ..FirewallConfig::default()
+        };
+        let runner = RecordingRunner::with_results([command_result(false, "permission denied")]);
+        let firewall = SystemFirewall::new(config, runner);
+        let ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 10));
+
+        let error = firewall.unban(ip).unwrap_err();
+        assert!(error.to_string().contains("permission denied"));
     }
 }

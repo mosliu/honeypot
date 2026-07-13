@@ -3,6 +3,8 @@ listen_addr = "0.0.0.0:2222"
 max_visits = 5
 window_seconds = 60
 max_tracked_ips = 100000
+max_concurrent_connections = 1024
+ban_queue_capacity = 4096
 allowlist = ["127.0.0.1", "::1", "172.23.16.0/24"]
 banner = "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3\r\n"
 read_after_banner_timeout_ms = 1500
@@ -16,6 +18,12 @@ password = "replace-with-a-long-random-password"
 inline_on_honeypot_port = false
 inline_path_prefix = "/_honeypot_admin"
 inline_probe_timeout_ms = 250
+inline_request_timeout_ms = 3000
+inline_max_request_bytes = 16384
+# Plaintext remote admin access is disabled unless this risk is explicitly accepted.
+allow_insecure_http = false
+# Temporary migration switch for 0.2 query-string passwords. Prefer Bearer authentication.
+allow_legacy_get_password = false
 
 [firewall]
 # Options:
@@ -42,6 +50,7 @@ ipset_name_v4 = "honeypot_banned_v4"
 ipset_name_v6 = "honeypot_banned_v6"
 ipset_hash_size = 4096
 ipset_max_elements = 1000000
+command_timeout_seconds = 15
 
 [state]
 banned_ips_path = "state/banned_ips.json"
@@ -54,6 +63,9 @@ password = "webdav-password"
 curl_binary = "curl"
 timeout_seconds = 15
 debounce_seconds = 5
+retry_initial_seconds = 5
+retry_max_seconds = 300
+allow_insecure_http = false
 
 [logging]
 directory = "logs"

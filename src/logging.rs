@@ -6,8 +6,16 @@ use std::{
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
+use tokio::{
+    sync::watch,
+    task::JoinHandle,
+    time::{Instant, MissedTickBehavior, interval_at},
+};
+use tracing::warn;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
+
+const LOG_CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 pub struct LoggingGuard {
     _guard: WorkerGuard,
@@ -51,12 +59,12 @@ pub fn cleanup_logs(config: &LoggingConfig) -> anyhow::Result<()> {
     let now = SystemTime::now();
 
     if config.retention_days > 0 {
-        let max_age = Duration::from_secs(config.retention_days * 24 * 60 * 60);
+        let max_age = Duration::from_secs(config.retention_days.saturating_mul(24 * 60 * 60));
         for file in &files {
             if let Ok(age) = now.duration_since(file.modified_at)
                 && age > max_age
             {
-                let _ = fs::remove_file(&file.path);
+                remove_log_file(&file.path, "expired by retention_days");
             }
         }
     }
@@ -64,10 +72,59 @@ pub fn cleanup_logs(config: &LoggingConfig) -> anyhow::Result<()> {
     files = log_files(directory, &prefix)?;
     files.sort_by_key(|file| Reverse(file.modified_at));
     for file in files.into_iter().skip(config.retention_files) {
-        let _ = fs::remove_file(file.path);
+        remove_log_file(&file.path, "exceeded retention_files");
     }
 
     Ok(())
+}
+
+fn remove_log_file(path: &Path, reason: &'static str) {
+    if let Err(error) = fs::remove_file(path) {
+        warn!(
+            path = %path.display(),
+            %error,
+            reason,
+            "failed to remove retained log file"
+        );
+    }
+}
+
+pub fn spawn_cleanup_worker(
+    config: LoggingConfig,
+    shutdown: watch::Receiver<bool>,
+) -> JoinHandle<()> {
+    tokio::spawn(run_cleanup_worker(config, shutdown, LOG_CLEANUP_INTERVAL))
+}
+
+async fn run_cleanup_worker(
+    config: LoggingConfig,
+    mut shutdown: watch::Receiver<bool>,
+    cleanup_interval: Duration,
+) {
+    if *shutdown.borrow() {
+        return;
+    }
+
+    let mut interval = interval_at(Instant::now() + cleanup_interval, cleanup_interval);
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break;
+                }
+            }
+            _ = interval.tick() => {
+                let cleanup_config = config.clone();
+                match tokio::task::spawn_blocking(move || cleanup_logs(&cleanup_config)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => warn!(%error, "periodic log cleanup failed"),
+                    Err(error) => warn!(%error, "periodic log cleanup task failed"),
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -125,5 +182,45 @@ mod tests {
 
         let remaining = log_files(dir.path(), "honeypot.log").unwrap();
         assert_eq!(remaining.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn periodic_cleanup_enforces_retention_until_shutdown() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = LoggingConfig {
+            directory: dir.path().to_string_lossy().to_string(),
+            file_prefix: "honeypot".to_string(),
+            retention_files: 1,
+            retention_days: 0,
+            ..LoggingConfig::default()
+        };
+        for day in 1..=3 {
+            fs::write(dir.path().join(format!("honeypot.log.2026-07-0{day}")), "x").unwrap();
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        let (shutdown_sender, shutdown_receiver) = watch::channel(false);
+        let worker = tokio::spawn(run_cleanup_worker(
+            config,
+            shutdown_receiver,
+            Duration::from_millis(10),
+        ));
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if log_files(dir.path(), "honeypot.log").unwrap().len() == 1 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        shutdown_sender.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), worker)
+            .await
+            .unwrap()
+            .unwrap();
     }
 }
